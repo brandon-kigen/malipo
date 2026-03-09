@@ -16,9 +16,13 @@ Server → 200 OK + data
 
 ## Status
 
-**Phase 1 — Storage layer (in progress)**
+**Phase 1 — Storage layer (complete)**
 
 The `StorageAdapter` interface, `Session` and `State` types, and sentinel errors are defined. Memory and SQLite adapters are next.
+
+**Phase 3 — Session Manager (in progress)**
+
+`GetStatus`, internal `transition`, phone normalisation, and `InitiatePayment` stub are written. Auth Manager integration and TTL goroutine are pending.
 
 ---
 
@@ -49,13 +53,16 @@ x402 assumes synchronous payment — client pays, server verifies, resource rele
 Malipo solves this with a session state machine persisted to storage:
 
 ```
-CREATED → STK_PUSHED → AWAITING_PIN → CONFIRMED → CONSUMED
-                  ↓           ↓
-               TIMEOUT    CANCELLED
-                           FAILED
+CREATED → STK_PUSHED → CONFIRMED → CONSUMED
+               ↓            ↓
+            TIMEOUT      TIMEOUT
+            CANCELLED
+            FAILED
 ```
 
-The session survives the async gap in storage. The x402 layer only releases the resource when `ConsumeIfConfirmed` transitions the session from `CONFIRMED` to `CONSUMED` atomically — one SQL statement is the entire double-spend prevention.
+`AWAITING_PIN` is defined but currently unreachable — it will be wired in after RP19 (STK Push Query API) research is complete and SIM delivery confirmation behaviour is verified against production Safaricom responses.
+
+The x402 layer only releases the resource when `ConsumeIfConfirmed` transitions the session from `CONFIRMED` to `CONSUMED` atomically — one SQL statement is the entire double-spend prevention.
 
 ---
 
@@ -103,7 +110,17 @@ malipo/
 ├── malipo.go           public API — New(), Config, Client
 ├── auth/               Daraja OAuth token management
 ├── session/            state machine, payment orchestration
+│   ├── state.go        Event type, validTransitions map
+│   ├── manager.go      Manager struct, NewManager, GetStatus,
+│   │                   internal transition, InitiatePayment
+│   ├── token.go        TokenProvider interface
+│   ├── request.go      PaymentRequest struct
+│   ├── phone.go        E.164 phone normalisation
+│   └── ttl.go          TTL goroutine, cleanup ticker (pending)
 ├── store/              StorageAdapter interface + Session types
+│   ├── adapter.go      StorageAdapter interface
+│   ├── session.go      Session and Update structs
+│   ├── state.go        State type, constants, sentinel errors
 │   ├── memory/         in-memory adapter (tests)
 │   └── sqlite/         SQLite adapter (default)
 ├── x402/               HTTP middleware — 402 responses, signature verification
@@ -133,9 +150,9 @@ You are responsible for Daraja API credentials, M-Pesa compliance, and float man
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 1 | Storage layer — interfaces, memory adapter, SQLite adapter | In progress |
+| 1 | Storage layer — interfaces, memory adapter, SQLite adapter | Complete |
 | 2 | Auth Manager — token lifecycle, Daraja OAuth | Pending |
-| 3 | Session Manager — state machine, TTL, InitiatePayment | Pending |
+| 3 | Session Manager — state machine, TTL, InitiatePayment | In progress |
 | 4 | x402 Middleware — 402 responses, signature verification | Pending |
 | 5 | Callback Handler — validation pipeline, lost callback recovery | Pending |
 | 6 | Integration tests, examples, documentation | Pending |
