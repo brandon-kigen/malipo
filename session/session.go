@@ -37,26 +37,41 @@ type Config struct {
 // It holds no session state itself — all state lives in the StorageAdapter.
 // Both dependencies are injected as interfaces — no concrete types imported.
 type Manager struct {
-	storage    store.StorageAdapter
-	auth       TokenProvider
-	cfg        Config
-	entropy    io.Reader    // cryptographically secure monotonic ULID entropy
-	httpClient *http.Client // outbound HTTP client for Daraja API calls
+	storage     store.StorageAdapter
+	auth        TokenProvider
+	cfg         Config
+	entropy     io.Reader    // cryptographically secure monotonic ULID entropy
+	httpClient  *http.Client // outbound HTTP client for Daraja API calls
+	stopCleanup chan struct{} // closed when Manager shuts down via Stop()
 }
 
 // NewManager constructs a Manager with its injected dependencies.
 // TTL defaults to 90s if not set — matching Safaricom's STK Push timeout.
+// Starts the background cleanup ticker automatically.
 func NewManager(auth TokenProvider, storage store.StorageAdapter, cfg Config) *Manager {
 	if cfg.TTL == 0 {
 		cfg.TTL = 90 * time.Second
 	}
-	return &Manager{
-		auth:       auth,
-		storage:    storage,
-		cfg:        cfg,
-		entropy:    ulid.Monotonic(rand.Reader, 0),
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+
+	m := &Manager{
+		auth:        auth,
+		storage:     storage,
+		cfg:         cfg,
+		entropy:     ulid.Monotonic(rand.Reader, 0),
+		httpClient:  &http.Client{Timeout: 10 * time.Second},
+		stopCleanup: make(chan struct{}),
 	}
+
+	m.startCleanupTicker()
+
+	return m
+}
+
+// Stop shuts down the cleanup ticker and all expireAfter goroutines.
+// Call this when the Manager is no longer needed, typically in a
+// server shutdown handler via signal trapping.
+func (m *Manager) Stop() {
+	close(m.stopCleanup)
 }
 
 // GetStatus returns the current state and expiry time of a session.
@@ -132,7 +147,7 @@ func (m *Manager) InitiatePayment(ctx context.Context, req PaymentRequest) (stri
 
 	// Step 5 — generate session ID and create storage record
 	id := ulid.MustNew(ulid.Now(), m.entropy).String()
-	now := time.Now() // could need refinement
+	now := time.Now()
 
 	session := &store.Session{
 		ID:        id,
@@ -197,7 +212,3 @@ type stkPushRequest struct {
 func (m *Manager) sendSTKPush(ctx context.Context, r stkPushRequest) (checkoutID, merchantID string, err error) {
 	return "", "", errors.New("sendSTKPush: not implemented")
 }
-
-// expireAfter fires EventTTLExpired after the given duration.
-// TODO: Stub — implemented in ttl.go.
-func (m *Manager) expireAfter(id string, ttl time.Duration) {}
