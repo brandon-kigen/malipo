@@ -8,13 +8,25 @@ import (
 	"github.com/brandon-kigen/malipo/store"
 )
 
+// PaymentRequest carries the parameters for a single payment initiation.
+// Reference and Desc are optional — if empty, Config defaults are used.
+type PaymentRequest struct {
+    Phone    string
+    Amount   int64
+    Currency string
+    Reference string // overrides Config.AccountReference if set
+    Desc      string // overrides Config.TransactionDesc if set
+}
+
 // Config holds everything the Manager needs to operate.
 // Provided by the caller at construction time.
 type Config struct {
-	Shortcode   string
-	Passkey     string
-	CallbackURL string
-	TTL         time.Duration // defaults to 90s if zero
+	Shortcode        string
+	Passkey          string
+	CallbackURL      string
+	TTL              time.Duration // defaults to 90s if zero
+	AccountReference string        // default for all payments
+	TransactionDesc  string        // default for all payments
 }
 
 // Manager owns the state machine rules and orchestrates
@@ -68,3 +80,14 @@ func (m *Manager) transition(ctx context.Context, id string, from store.State, e
 	}
 	return nil
 }
+
+func (m *Manager) InitiatePayment(ctx context.Context, req PaymentRequest) (string, error) {
+	phone, err := normalizePhone(req.Phone)
+	if err != nil {
+		return "", err
+	}
+
+	_ = phone // will be used when full implementation is written
+	return "", nil
+}
+
