@@ -51,3 +51,20 @@ func (m *Manager) GetStatus(ctx context.Context, id string) (string, time.Time, 
 
 	return string(session.State), session.ExpiresAt, nil
 }
+
+func (m *Manager) transition(ctx context.Context, id string, from store.State, event Event, u *store.Update) error {
+	events, ok := validTransitions[from]
+	if !ok {
+		return store.ErrInvalidTransition
+	}
+
+	to, ok := events[event]
+	if !ok {
+		return store.ErrInvalidTransition
+	}
+
+	if err := m.storage.Transition(ctx, id, from, to, u); err != nil {
+		return err
+	}
+	return nil
+}
