@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -138,7 +137,6 @@ func (m *Manager) GetAccessToken(ctx context.Context) (string, error) {
 func (m *Manager) GeneratePassword(shortcode, passkey string) (password, timestamp string) {
 	loc, err := time.LoadLocation("Africa/Nairobi")
 	if err != nil {
-		// timezone database unavailable — import time/tzdata for static binaries
 		return "", ""
 	}
 
@@ -149,8 +147,4 @@ func (m *Manager) GeneratePassword(shortcode, passkey string) (password, timesta
 	return password, timestamp
 }
 
-// fetchToken makes the outbound HTTP call to the Daraja OAuth endpoint.
-// Implemented in daraja.go.
-func (m *Manager) fetchToken(ctx context.Context) (token, expiresIn string, err error) {
-	return "", "", errors.New("fetchToken: not implemented")
-}
+
