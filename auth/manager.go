@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	_ "time/tzdata"
 )
 
 // Environment controls which Daraja API base URL the Manager targets.
