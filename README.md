@@ -20,9 +20,13 @@ Server → 200 OK + data
 
 The `StorageAdapter` interface, `Session` and `State` types, and sentinel errors are defined. Memory and SQLite adapters are next.
 
-**Phase 3 — Session Manager (in progress)**
+**Phase 2 — Auth Manager (complete)**
 
-`GetStatus`, internal `transition`, phone normalisation, and `InitiatePayment` stub are written. Auth Manager integration and TTL goroutine are pending.
+Token caching with double-checked RWMutex locking, `GeneratePassword` in EAT, `fetchToken` and `SendSTKPush` Daraja HTTP calls. `auth.Manager` satisfies `session.TokenProvider` implicitly.
+
+**Phase 3 — Session Manager (complete)**
+
+State machine, `GetStatus`, internal `transition`, phone normalisation, `InitiatePayment`, TTL goroutine, and cleanup ticker. `sendSTKPush` delegates to `auth.Manager` via `TokenProvider` interface. First successful `go build ./...` across all packages.
 
 ---
 
@@ -109,17 +113,20 @@ For testing against real Safaricom APIs, copy `.env.example` to `.env` and fill 
 malipo/
 ├── malipo.go           public API — New(), Config, Client
 ├── auth/               Daraja OAuth token management
+│   ├── manager.go      Manager struct, NewManager, GetAccessToken,
+│   │                   GeneratePassword, token cache, RWMutex
+│   └── daraja.go       fetchToken, SendSTKPush, request/response structs
 ├── session/            state machine, payment orchestration
 │   ├── state.go        Event type, validTransitions map
 │   ├── manager.go      Manager struct, NewManager, GetStatus,
-│   │                   internal transition, InitiatePayment
-│   ├── token.go        TokenProvider interface
+│   │                   internal transition, InitiatePayment, sendSTKPush
+│   ├── token.go        TokenProvider interface, STKPushRequest moved to store
 │   ├── request.go      PaymentRequest struct
 │   ├── phone.go        E.164 phone normalisation
-│   └── ttl.go          TTL goroutine, cleanup ticker (pending)
+│   └── ttl.go          expireAfter goroutine, startCleanupTicker, Stop
 ├── store/              StorageAdapter interface + Session types
 │   ├── adapter.go      StorageAdapter interface
-│   ├── session.go      Session and Update structs
+│   ├── session.go      Session, Update, STKPushRequest structs
 │   ├── state.go        State type, constants, sentinel errors
 │   ├── memory/         in-memory adapter (tests)
 │   └── sqlite/         SQLite adapter (default)
@@ -151,8 +158,8 @@ You are responsible for Daraja API credentials, M-Pesa compliance, and float man
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 1 | Storage layer — interfaces, memory adapter, SQLite adapter | Complete |
-| 2 | Auth Manager — token lifecycle, Daraja OAuth | Pending |
-| 3 | Session Manager — state machine, TTL, InitiatePayment | In progress |
+| 2 | Auth Manager — token lifecycle, Daraja OAuth | Complete |
+| 3 | Session Manager — state machine, TTL, InitiatePayment | Complete |
 | 4 | x402 Middleware — 402 responses, signature verification | Pending |
 | 5 | Callback Handler — validation pipeline, lost callback recovery | Pending |
 | 6 | Integration tests, examples, documentation | Pending |
