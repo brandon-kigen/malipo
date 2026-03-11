@@ -38,3 +38,17 @@ type Update struct {
 	ConfirmedPhone     *string
 	ConsumedAt         *time.Time
 }
+
+// STKPushRequest carries the parameters for a single Daraja STK Push call.
+// Defined in store to avoid a circular import between session and auth.
+type STKPushRequest struct {
+    Token       string
+    Password    string
+    Timestamp   string
+    Phone       string
+    Amount      int64
+    Shortcode   string
+    CallbackURL string
+    Reference   string
+    Desc        string
+}

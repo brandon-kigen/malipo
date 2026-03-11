@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
-	"net/http"
 	"time"
 
 	"github.com/brandon-kigen/malipo/store"
@@ -41,7 +40,6 @@ type Manager struct {
 	auth        TokenProvider
 	cfg         Config
 	entropy     io.Reader    // cryptographically secure monotonic ULID entropy
-	httpClient  *http.Client // outbound HTTP client for Daraja API calls
 	stopCleanup chan struct{} // closed when Manager shuts down via Stop()
 }
 
@@ -58,7 +56,6 @@ func NewManager(auth TokenProvider, storage store.StorageAdapter, cfg Config) *M
 		storage:     storage,
 		cfg:         cfg,
 		entropy:     ulid.Monotonic(rand.Reader, 0),
-		httpClient:  &http.Client{Timeout: 10 * time.Second},
 		stopCleanup: make(chan struct{}),
 	}
 
@@ -166,15 +163,17 @@ func (m *Manager) InitiatePayment(ctx context.Context, req PaymentRequest) (stri
 
 	// Step 6 — send STK Push to Daraja
 	// sendSTKPush is a stub — implemented when auth package is complete
-	checkoutID, merchantID, err := m.sendSTKPush(ctx, stkPushRequest{
-		token:     token,
-		password:  password,
-		timestamp: timestamp,
-		phone:     phone,
-		amount:    req.Amount,
-		reference: ref,
-		desc:      desc,
-	})
+	checkoutID, merchantID, err := m.sendSTKPush(ctx, store.STKPushRequest{
+    Token:       token,
+    Password:    password,
+    Timestamp:   timestamp,
+    Phone:       phone,
+    Amount:      req.Amount,
+    Shortcode:   m.cfg.Shortcode,
+    CallbackURL: m.cfg.CallbackURL,
+    Reference:   ref,
+    Desc:        desc,
+})
 	if err != nil {
 		// transition to FAILED — session exists in storage, must not be left in CREATED
 		_ = m.transition(ctx, id, store.StateCreated, EventSTKRejected, nil)
@@ -196,19 +195,8 @@ func (m *Manager) InitiatePayment(ctx context.Context, req PaymentRequest) (stri
 	return id, nil
 }
 
-// stkPushRequest carries the parameters for a single Daraja STK Push call.
-type stkPushRequest struct {
-	token     string
-	password  string
-	timestamp string
-	phone     string
-	amount    int64
-	reference string
-	desc      string
-}
-
 // sendSTKPush makes the outbound HTTP call to the Daraja STK Push endpoint.
 // TODO: Stub — implemented in Phase 2 when auth package HTTP client is complete.
-func (m *Manager) sendSTKPush(ctx context.Context, r stkPushRequest) (checkoutID, merchantID string, err error) {
-	return "", "", errors.New("sendSTKPush: not implemented")
+func (m *Manager) sendSTKPush(ctx context.Context, req store.STKPushRequest) (checkoutID, merchantID string, err error) {
+    return m.auth.SendSTKPush(ctx, req)
 }
