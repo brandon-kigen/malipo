@@ -1,36 +1,63 @@
 # Malipo
 
-Go middleware SDK that bridges the [x402 HTTP payment protocol](https://x402.org) to the M-Pesa Daraja STK Push API. Drop it into any `net/http`-compatible server to gate resources behind real M-Pesa payments.
+Go middleware SDK that bridges the [x402 HTTP payment protocol](https://x402.org) to the M-Pesa Daraja STK Push API. Gate any `net/http` resource behind a real M-Pesa payment with just a few lines of code.
+
+---
+
+## Quick Example
+
+```go
+// Initialise once at startup
+pay, err := malipo.New(malipo.Config{
+    ConsumerKey:      "your-consumer-key",
+    ConsumerSecret:   "your-consumer-secret",
+    Shortcode:        "174379",
+    Passkey:          "your-passkey",
+    CallbackURL:      "https://yourserver.com/mpesa/callback",
+    Environment:      malipo.Sandbox,
+    AccountReference: "CompanyX",
+    TransactionDesc:  "Payment",
+})
+
+// Wrap any handler
+mux.Handle("/api/data", pay.Middleware(yourHandler))
+```
+
+When a client hits `/api/data` without a valid payment signature, Malipo returns a `402 Payment Required` response with the payment requirements encoded in the header. The client initiates a payment, polls until confirmed, then retries the request with the signature. Malipo verifies and releases the resource.
+
+---
+
+## How It Works
+
+### The async gap problem
+
+x402 assumes synchronous payment — client pays, server verifies, resource released in one cycle. M-Pesa STK Push is asynchronous — Safaricom delivers a PIN prompt to the user's SIM over its own network, the user decides, Safaricom posts a callback 5 to 30 seconds later.
 
 ```
 Client → GET /api/data
-Server → 402 Payment Required
-Client → POST /malipo/session (phone + amount)
+Server → 402 Payment Required  (x402 payment requirements in header)
+
+Client → POST /malipo/session   (phone + amount)
+Server → 200 session_id
+
          [Safaricom delivers PIN prompt to user's SIM]
-Client → GET /malipo/session/{id} (polls until confirmed)
+         [User enters PIN]
+         [Safaricom POSTs callback to your server]
+
+Client → GET /malipo/session/{id}  (polls until CONFIRMED)
+Server → 200 CONFIRMED
+
 Client → GET /api/data + X-PAYMENT-SIGNATURE
 Server → 200 OK + data
 ```
 
----
+### The solution
 
-## Status
-
-**Phase 1 — Storage layer (complete)**
-
-The `StorageAdapter` interface, `Session` and `State` types, and sentinel errors are defined. Memory and SQLite adapters are next.
-
-**Phase 2 — Auth Manager (complete)**
-
-Token caching with double-checked RWMutex locking, `GeneratePassword` in EAT, `fetchToken` and `SendSTKPush` Daraja HTTP calls. `auth.Manager` satisfies `session.TokenProvider` implicitly.
-
-**Phase 3 — Session Manager (complete)**
-
-State machine, `GetStatus`, internal `transition`, phone normalisation, `InitiatePayment`, TTL goroutine, and cleanup ticker. `sendSTKPush` delegates to `auth.Manager` via `TokenProvider` interface. First successful `go build ./...` across all packages.
+Malipo persists a session record that survives the async gap. The session tracks the payment through its full lifecycle via a state machine. The x402 middleware only releases the resource when `ConsumeIfConfirmed` transitions the session from `CONFIRMED` to `CONSUMED` — one atomic SQL statement is the entire double-spend prevention.
 
 ---
 
-## Design
+## Architecture
 
 Malipo is four packages with a strict one-way dependency chain:
 
@@ -48,31 +75,51 @@ Callback Handler ─┤──► Session Manager ──► TokenProvider (interf
                   └──────────────────
 ```
 
-The Session Manager never imports a concrete storage or auth type. Both are injected as interfaces at construction time. This keeps every package independently testable and keeps the dependency graph acyclic.
+The Session Manager never imports a concrete storage or auth type. Both are injected as interfaces at construction time — every package is independently testable and the dependency graph is acyclic.
 
-### The async gap problem
+### Packages
 
-x402 assumes synchronous payment — client pays, server verifies, resource released in one cycle. M-Pesa STK Push is asynchronous — Safaricom delivers a PIN prompt to the user's SIM over its own network, the user decides, Safaricom posts a callback 5 to 30 seconds later.
+| Package | Responsibility |
+|---|---|
+| `store/` | `StorageAdapter` interface, `Session`, `State`, sentinel errors |
+| `session/` | State machine rules, payment orchestration, TTL lifecycle |
+| `auth/` | Daraja OAuth token cache, password generation, STK Push HTTP |
+| `x402/` | 402 responses, signature verification, middleware _(Phase 4)_ |
+| `callback/` | Safaricom callback handler, validation pipeline _(Phase 5)_ |
 
-Malipo solves this with a session state machine persisted to storage:
+---
+
+## State Machine
+
+Every payment session moves through a defined set of states. Terminal states cannot be left — any write attempt on a terminal session is rejected by the storage adapter.
 
 ```
 CREATED → STK_PUSHED → CONFIRMED → CONSUMED
-               ↓            ↓
-            TIMEOUT      TIMEOUT
-            CANCELLED
-            FAILED
+               │            │
+               ▼            ▼
+             FAILED       TIMEOUT
+           CANCELLED
+           TIMEOUT
 ```
 
-`AWAITING_PIN` is defined but currently unreachable — it will be wired in after RP19 (STK Push Query API) research is complete and SIM delivery confirmation behaviour is verified against production Safaricom responses.
-
-The x402 layer only releases the resource when `ConsumeIfConfirmed` transitions the session from `CONFIRMED` to `CONSUMED` atomically — one SQL statement is the entire double-spend prevention.
+`AWAITING_PIN` is defined but currently unreachable — it will be wired in after RP19 (STK Push Query API) research confirms SIM delivery notification behaviour in production.
 
 ---
 
 ## Storage Backends
 
-SQLite is the default and requires no configuration. For multi-instance deployments, provide a Redis adapter:
+SQLite is the default — zero configuration, embedded in the binary, no external services required.
+
+```go
+// Default — SQLite at the given path
+adapter, err := sqlite.NewSQLiteAdapter(ctx, "./malipo.db")
+
+// In-memory SQLite for integration tests
+adapter, err := sqlite.NewSQLiteAdapter(ctx, ":memory:")
+
+// In-memory Go map for unit tests
+adapter := memory.NewMemoryAdapter()
+```
 
 ### Bring your own
 
@@ -89,9 +136,11 @@ type StorageAdapter interface {
 }
 ```
 
+Redis, PostgreSQL, and other backends are community-implementable via this interface.
+
 ---
 
-## Development Setup
+## Development
 
 ```bash
 git clone https://github.com/brandon-kigen/malipo
@@ -101,9 +150,9 @@ go build ./...
 go test ./...
 ```
 
-No Docker, no external services required for tests. The test suite runs entirely against the in-memory adapter.
+No Docker, no external services required. The unit test suite runs entirely against the in-memory adapter. Integration tests use an in-memory SQLite database.
 
-For testing against real Safaricom APIs, copy `.env.example` to `.env` and fill in your Daraja sandbox credentials. Use a local tunnel (e.g. `ngrok`) to expose your callback URL.
+For testing against real Safaricom APIs, copy `.env.example` to `.env` and fill in your Daraja sandbox credentials. Use a local tunnel such as `ngrok` to expose your callback URL.
 
 ---
 
@@ -111,32 +160,45 @@ For testing against real Safaricom APIs, copy `.env.example` to `.env` and fill 
 
 ```
 malipo/
-├── malipo.go           public API — New(), Config, Client
-├── auth/               Daraja OAuth token management
-│   ├── manager.go      Manager struct, NewManager, GetAccessToken,
-│   │                   GeneratePassword, token cache, RWMutex
-│   └── daraja.go       fetchToken, SendSTKPush, request/response structs
-├── session/            state machine, payment orchestration
-│   ├── state.go        Event type, validTransitions map
-│   ├── manager.go      Manager struct, NewManager, GetStatus,
-│   │                   internal transition, InitiatePayment, sendSTKPush
-│   ├── token.go        TokenProvider interface, STKPushRequest moved to store
-│   ├── request.go      PaymentRequest struct
-│   ├── phone.go        E.164 phone normalisation
-│   └── ttl.go          expireAfter goroutine, startCleanupTicker, Stop
-├── store/              StorageAdapter interface + Session types
-│   ├── adapter.go      StorageAdapter interface
-│   ├── session.go      Session, Update, STKPushRequest structs
-│   ├── state.go        State type, constants, sentinel errors
-│   ├── memory/         in-memory adapter (tests)
-│   └── sqlite/         SQLite adapter (default)
-├── x402/               HTTP middleware — 402 responses, signature verification
-├── callback/           Safaricom callback handler + validation pipeline
-├── tools/gendocs/      dev tool — generates state machine diagrams
+├── malipo.go               public API — New(), Config, Client
+├── auth/
+│   ├── manager.go          Manager struct, GetAccessToken, GeneratePassword
+│   └── daraja.go           fetchToken, SendSTKPush, Daraja HTTP calls
+├── session/
+│   ├── state.go            Event type, validTransitions map
+│   ├── manager.go          Manager struct, NewManager, InitiatePayment
+│   ├── token.go            TokenProvider interface, STKPushRequest
+│   ├── phone.go            E.164 phone normalisation
+│   └── ttl.go              expireAfter goroutine, cleanup ticker, Stop
+├── store/
+│   ├── adapter.go          StorageAdapter interface
+│   ├── session.go          Session, Update, STKPushRequest structs
+│   ├── state.go            State type, constants, IsTerminal, sentinel errors
+│   ├── memory/
+│   │   └── memory.go       In-memory adapter — unit tests
+│   └── sqlite/
+│       ├── sqlite.go       SQLite adapter — production default
+│       ├── schema.sql      CREATE TABLE, WAL pragma, partial indexes
+│       └── queries/        Embedded SQL — one file per query
+├── x402/                   HTTP middleware — 402 responses _(Phase 4)_
+├── callback/               Safaricom callback handler _(Phase 5)_
 └── examples/
-    ├── chi/            Chi router integration example
-    └── stdlib/         net/http standard library example
+    ├── chi/                Chi router integration example
+    └── stdlib/             net/http standard library example
 ```
+
+---
+
+## Roadmap
+
+| Phase | Description | Status |
+|---|---|---|
+| 1 | Storage layer — interfaces, memory adapter, SQLite adapter | ✅ Complete |
+| 2 | Auth Manager — token lifecycle, Daraja OAuth, STK Push | ✅ Complete |
+| 3 | Session Manager — state machine, TTL, InitiatePayment | ✅ Complete |
+| 4 | x402 Middleware — 402 responses, signature verification | ⏳ Pending |
+| 5 | Callback Handler — validation pipeline, lost callback recovery | ⏳ Pending |
+| 6 | Integration tests, examples, documentation | ⏳ Pending |
 
 ---
 
@@ -150,19 +212,6 @@ Malipo is a **Bring Your Own Credentials** SDK. It runs entirely within your inf
 - Apache 2.0 licensed
 
 You are responsible for Daraja API credentials, M-Pesa compliance, and float management. Malipo handles the protocol bridging only.
-
----
-
-## Roadmap
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 1 | Storage layer — interfaces, memory adapter, SQLite adapter | Complete |
-| 2 | Auth Manager — token lifecycle, Daraja OAuth | Complete |
-| 3 | Session Manager — state machine, TTL, InitiatePayment | Complete |
-| 4 | x402 Middleware — 402 responses, signature verification | Pending |
-| 5 | Callback Handler — validation pipeline, lost callback recovery | Pending |
-| 6 | Integration tests, examples, documentation | Pending |
 
 ---
 
