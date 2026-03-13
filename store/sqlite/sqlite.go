@@ -104,8 +104,8 @@ func (a *SQLiteAdapter) Create(ctx context.Context, s *store.Session) error {
 		s.MpesaReceiptNumber,
 		s.ConfirmedAmount,
 		s.ConfirmedPhone,
-		s.CreatedAt.Format(time.RFC3339),
-		s.ExpiresAt.Format(time.RFC3339),
+		s.CreatedAt.UTC().Format(time.RFC3339),
+		s.ExpiresAt.UTC().Format(time.RFC3339),
 		consumedAt,
 	)
 	if err != nil {
@@ -172,7 +172,7 @@ func (a *SQLiteAdapter) Transition(ctx context.Context, id string, from, to stor
 		confirmedAmount = u.ConfirmedAmount
 		confirmedPhone = u.ConfirmedPhone
 		if u.ConsumedAt != nil {
-			t := u.ConsumedAt.Format(time.RFC3339)
+			t := u.ConsumedAt.UTC().Format(time.RFC3339)
 			consumedAt = &t
 		}
 	}
@@ -213,7 +213,7 @@ func (a *SQLiteAdapter) Transition(ctx context.Context, id string, from, to stor
 // If rows affected is zero the session either does not exist or was not CONFIRMED.
 // A follow-up Get distinguishes between not found and already consumed.
 func (a *SQLiteAdapter) ConsumeIfConfirmed(ctx context.Context, id string) (*store.Session, error) {
-	consumedAt := time.Now().Format(time.RFC3339)
+	consumedAt := time.Now().UTC().Format(time.RFC3339)
 
 	result, err := a.db.ExecContext(ctx, consumeIfConfirmedQuery,
 		consumedAt,
@@ -248,7 +248,7 @@ func (a *SQLiteAdapter) ConsumeIfConfirmed(ctx context.Context, id string) (*sto
 // Returns the number of sessions expired. Zero is not an error.
 func (a *SQLiteAdapter) ExpireStale(ctx context.Context, before time.Time) (int64, error) {
 	result, err := a.db.ExecContext(ctx, expireStaleQuery,
-		before.Format(time.RFC3339),
+		before.UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: expire stale failed: %w", err)
