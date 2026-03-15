@@ -200,3 +200,12 @@ func (m *Manager) InitiatePayment(ctx context.Context, req PaymentRequest) (stri
 func (m *Manager) sendSTKPush(ctx context.Context, req store.STKPushRequest) (checkoutID, merchantID string, err error) {
     return m.auth.SendSTKPush(ctx, req)
 }
+
+func (m *Manager) ConsumeIfConfirmed(ctx context.Context, sessionID string) error {
+	_, err := m.storage.ConsumeIfConfirmed(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+  return nil
+}
+
