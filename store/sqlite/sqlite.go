@@ -33,6 +33,9 @@ var consumeIfConfirmedQuery string
 //go:embed queries/expire_stale.sql
 var expireStaleQuery string
 
+//go:embed queries/list_pending.sql
+var listPendingQuery string
+
 // SQLiteAdapter is a persistent implementation of store.StorageAdapter
 // backed by a local SQLite database via modernc.org/sqlite (pure Go, no CGO).
 // It is the default adapter for production deployments.
@@ -260,6 +263,39 @@ func (a *SQLiteAdapter) ExpireStale(ctx context.Context, before time.Time) (int6
 	}
 
 	return affected, nil
+}
+
+// ListPending returns all sessions in STK_PUSHED or AWAITING_PIN state
+// whose created_at is before the given threshold.
+// Returns an empty slice if no sessions match — never returns nil.
+func (a *SQLiteAdapter) ListPending(ctx context.Context, before time.Time) ([]*store.Session, error) {
+	rows, err := a.db.QueryContext(ctx, listPendingQuery,
+		before.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list pending failed: %w", err)
+	}
+	defer rows.Close()
+
+	var pending []*store.Session
+
+	for rows.Next() {
+		session, err := scanSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		pending = append(pending, session)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: list pending rows error: %w", err)
+	}
+
+	if pending == nil {
+		pending = []*store.Session{}
+	}
+
+	return pending, nil
 }
 
 // scanSession scans a single row from a sessions query into a store.Session.

@@ -199,3 +199,27 @@ func (a *MemoryAdapter) ExpireStale(ctx context.Context, before time.Time) (int6
 
 	return count, nil
 }
+
+// ListPending returns copies of all sessions in STK_PUSHED or AWAITING_PIN
+// state whose CreatedAt is before the given threshold.
+// Returns an empty slice if no sessions match — never returns nil.
+func (a *MemoryAdapter) ListPending(ctx context.Context, before time.Time) ([]*store.Session, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	var pending []*store.Session
+
+	for _, session := range a.sessions {
+		if session.CreatedAt.Before(before) &&
+			(session.State == store.StateSTKPushed || session.State == store.StateAwaitingPIN) {
+			copy := *session
+			pending = append(pending, &copy)
+		}
+	}
+
+	if pending == nil {
+		pending = []*store.Session{}
+	}
+
+	return pending, nil
+}

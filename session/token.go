@@ -12,4 +12,5 @@ type TokenProvider interface {
 	GetAccessToken(ctx context.Context) (string, error)
 	GeneratePassword(shortcode, passkey string) (password, timestamp string)
 	SendSTKPush(ctx context.Context, req store.STKPushRequest) (checkoutID, merchantID string, err error)
+	QuerySTKStatus(ctx context.Context, shortcode, passkey, checkoutRequestID string) (resultCode, resultDesc string, err error)
 }

@@ -653,3 +653,287 @@ func TestExpireStale(t *testing.T) {
 		}
 	})
 }
+
+// ── ListPending ───────────────────────────────────────────────────────────────
+
+func TestListPending(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("returns STK_PUSHED sessions older than threshold", func(t *testing.T) {
+		a := memory.NewMemoryAdapter()
+		now := time.Now()
+
+		s := &store.Session{
+			ID:        "01JMWX0000000000000023",
+			State:     store.StateSTKPushed,
+			Phone:     "+254712345678",
+			Amount:    100,
+			Currency:  "KES",
+			Shortcode: "174379",
+			CreatedAt: now.Add(-2 * time.Minute), // older than threshold
+			ExpiresAt: now.Add(90 * time.Second),
+		}
+		if err := a.Create(ctx, s); err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+
+		got, err := a.ListPending(ctx, now.Add(-1*time.Minute))
+		if err != nil {
+			t.Fatalf("ListPending failed: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("got %d sessions want 1", len(got))
+		}
+		if got[0].ID != s.ID {
+			t.Errorf("got ID %q want %q", got[0].ID, s.ID)
+		}
+	})
+
+	t.Run("returns AWAITING_PIN sessions older than threshold", func(t *testing.T) {
+		a := memory.NewMemoryAdapter()
+		now := time.Now()
+
+		s := &store.Session{
+			ID:        "01JMWX0000000000000024",
+			State:     store.StateAwaitingPIN,
+			Phone:     "+254712345678",
+			Amount:    100,
+			Currency:  "KES",
+			Shortcode: "174379",
+			CreatedAt: now.Add(-2 * time.Minute),
+			ExpiresAt: now.Add(90 * time.Second),
+		}
+		if err := a.Create(ctx, s); err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+
+		got, err := a.ListPending(ctx, now.Add(-1*time.Minute))
+		if err != nil {
+			t.Fatalf("ListPending failed: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("got %d sessions want 1", len(got))
+		}
+		if got[0].State != store.StateAwaitingPIN {
+			t.Errorf("got state %q want AWAITING_PIN", got[0].State)
+		}
+	})
+
+	t.Run("does not return sessions newer than threshold", func(t *testing.T) {
+		a := memory.NewMemoryAdapter()
+		now := time.Now()
+
+		s := &store.Session{
+			ID:        "01JMWX0000000000000025",
+			State:     store.StateSTKPushed,
+			Phone:     "+254712345678",
+			Amount:    100,
+			Currency:  "KES",
+			Shortcode: "174379",
+			CreatedAt: now.Add(-10 * time.Second), // newer than threshold
+			ExpiresAt: now.Add(90 * time.Second),
+		}
+		if err := a.Create(ctx, s); err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+
+		// threshold is 1 minute ago — session is only 10s old
+		got, err := a.ListPending(ctx, now.Add(-1*time.Minute))
+		if err != nil {
+			t.Fatalf("ListPending failed: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %d sessions want 0 — session is too new to query", len(got))
+		}
+	})
+
+	t.Run("does not return CREATED sessions", func(t *testing.T) {
+		a := memory.NewMemoryAdapter()
+		now := time.Now()
+
+		s := &store.Session{
+			ID:        "01JMWX0000000000000026",
+			State:     store.StateCreated, // not pending
+			Phone:     "+254712345678",
+			Amount:    100,
+			Currency:  "KES",
+			Shortcode: "174379",
+			CreatedAt: now.Add(-2 * time.Minute),
+			ExpiresAt: now.Add(90 * time.Second),
+		}
+		if err := a.Create(ctx, s); err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+
+		got, err := a.ListPending(ctx, now)
+		if err != nil {
+			t.Fatalf("ListPending failed: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %d sessions want 0 — CREATED is not a pending state", len(got))
+		}
+	})
+
+	t.Run("does not return CONFIRMED sessions", func(t *testing.T) {
+		a := memory.NewMemoryAdapter()
+		now := time.Now()
+
+		s := &store.Session{
+			ID:        "01JMWX0000000000000027",
+			State:     store.StateConfirmed,
+			Phone:     "+254712345678",
+			Amount:    100,
+			Currency:  "KES",
+			Shortcode: "174379",
+			CreatedAt: now.Add(-2 * time.Minute),
+			ExpiresAt: now.Add(90 * time.Second),
+		}
+		if err := a.Create(ctx, s); err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+
+		got, err := a.ListPending(ctx, now)
+		if err != nil {
+			t.Fatalf("ListPending failed: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %d sessions want 0 — CONFIRMED is not a pending state", len(got))
+		}
+	})
+
+	t.Run("does not return terminal sessions", func(t *testing.T) {
+		a := memory.NewMemoryAdapter()
+		now := time.Now()
+
+		terminalStates := []store.State{
+			store.StateConsumed,
+			store.StateTimeout,
+			store.StateCancelled,
+			store.StateFailed,
+		}
+
+		ids := []string{
+			"01JMWX0000000000000028",
+			"01JMWX0000000000000029",
+			"01JMWX0000000000000030",
+			"01JMWX0000000000000031",
+		}
+
+		for i, state := range terminalStates {
+			s := &store.Session{
+				ID:        ids[i],
+				State:     state,
+				Phone:     "+254712345678",
+				Amount:    100,
+				Currency:  "KES",
+				Shortcode: "174379",
+				CreatedAt: now.Add(-2 * time.Minute),
+				ExpiresAt: now.Add(-1 * time.Minute),
+			}
+			if err := a.Create(ctx, s); err != nil {
+				t.Fatalf("Create %s failed: %v", state, err)
+			}
+		}
+
+		got, err := a.ListPending(ctx, now)
+		if err != nil {
+			t.Fatalf("ListPending failed: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %d sessions want 0 — terminal sessions must not be returned", len(got))
+		}
+	})
+
+	t.Run("returns empty slice not nil when nothing matches", func(t *testing.T) {
+		a := memory.NewMemoryAdapter()
+
+		got, err := a.ListPending(ctx, time.Now())
+		if err != nil {
+			t.Fatalf("ListPending failed: %v", err)
+		}
+		if got == nil {
+			t.Error("got nil want empty slice")
+		}
+		if len(got) != 0 {
+			t.Errorf("got %d sessions want 0", len(got))
+		}
+	})
+
+	t.Run("returns copies — mutating result does not affect stored record", func(t *testing.T) {
+		a := memory.NewMemoryAdapter()
+		now := time.Now()
+
+		s := &store.Session{
+			ID:        "01JMWX0000000000000032",
+			State:     store.StateSTKPushed,
+			Phone:     "+254712345678",
+			Amount:    100,
+			Currency:  "KES",
+			Shortcode: "174379",
+			CreatedAt: now.Add(-2 * time.Minute),
+			ExpiresAt: now.Add(90 * time.Second),
+		}
+		if err := a.Create(ctx, s); err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+
+		got, err := a.ListPending(ctx, now)
+		if err != nil {
+			t.Fatalf("ListPending failed: %v", err)
+		}
+		if len(got) == 0 {
+			t.Fatal("expected one session")
+		}
+
+		// Mutate the returned copy
+		got[0].State = store.StateConsumed
+		got[0].Phone = "+254999999999"
+
+		// Stored record must be unchanged
+		stored, err := a.Get(ctx, s.ID)
+		if err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if stored.State != store.StateSTKPushed {
+			t.Errorf("stored state was mutated: got %q want STK_PUSHED", stored.State)
+		}
+		if stored.Phone != "+254712345678" {
+			t.Errorf("stored phone was mutated: got %q want +254712345678", stored.Phone)
+		}
+	})
+
+	t.Run("returns multiple matching sessions", func(t *testing.T) {
+		a := memory.NewMemoryAdapter()
+		now := time.Now()
+
+		ids := []string{
+			"01JMWX0000000000000033",
+			"01JMWX0000000000000034",
+			"01JMWX0000000000000035",
+		}
+
+		for _, id := range ids {
+			s := &store.Session{
+				ID:        id,
+				State:     store.StateSTKPushed,
+				Phone:     "+254712345678",
+				Amount:    100,
+				Currency:  "KES",
+				Shortcode: "174379",
+				CreatedAt: now.Add(-2 * time.Minute),
+				ExpiresAt: now.Add(90 * time.Second),
+			}
+			if err := a.Create(ctx, s); err != nil {
+				t.Fatalf("Create %s failed: %v", id, err)
+			}
+		}
+
+		got, err := a.ListPending(ctx, now.Add(-1*time.Minute))
+		if err != nil {
+			t.Fatalf("ListPending failed: %v", err)
+		}
+		if len(got) != 3 {
+			t.Errorf("got %d sessions want 3", len(got))
+		}
+	})
+}

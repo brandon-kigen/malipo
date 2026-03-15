@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"github.com/brandon-kigen/malipo/store"
@@ -33,51 +34,82 @@ func (m *Manager) expireAfter(id string, ttl time.Duration) {
 	}
 }
 
-// startCleanupTicker runs a background goroutine that bulk-expires stale
-// sessions every 30 seconds by calling storage.ExpireStale with the current
-// time as the cutoff.
+// startCleanupTicker runs a background goroutine that fires every 30 seconds.
+// On each tick it runs two passes in order:
 //
-// This is the safety net for sessions whose expireAfter goroutine was lost
-// across a process restart. SQLite persists the expires_at timestamp so
-// ExpireStale can identify and expire them regardless of whether a goroutine
-// is still running for each one.
+//  1. Recovery pass — queries Daraja for all sessions in STK_PUSHED or
+//     AWAITING_PIN whose CreatedAt is older than QueryThreshold. For each,
+//     it calls QuerySTKStatus and drives the state machine from the result.
+//     Sessions that cannot be queried are left alone — ExpireStale will
+//     catch them on TTL expiry.
 //
-// The two-layer expiry design:
-//   - expireAfter  — per-session goroutine, fires exactly at TTL (belt)
-//   - startCleanupTicker — bulk sweep every 30s, catches missed expirations (braces)
+//  2. Expiry pass — calls ExpireStale to transition any non-terminal session
+//     whose expires_at is in the past to TIMEOUT. This is the safety net for
+//     sessions that neither the callback nor the recovery pass resolved.
 //
 // Started automatically by NewManager. Stopped by closing m.stopCleanup
-// via Manager.Stop(). Closing a channel unblocks all goroutines waiting
-// on it simultaneously — both expireAfter goroutines and the ticker goroutine
-// exit cleanly when Stop() is called.
+// via Manager.Stop().
 func (m *Manager) startCleanupTicker() {
-	// time.NewTicker creates a ticker that fires every 30 seconds.
-	// Unlike time.Tick, this can be stopped — ticker.Stop() releases
-	// the underlying timer and prevents a goroutine leak.
 	ticker := time.NewTicker(30 * time.Second)
 
 	go func() {
-		// ticker.Stop() is deferred so it always runs when this
-		// goroutine exits — whether from stopCleanup or a panic.
 		defer ticker.Stop()
 
 		for {
 			select {
-
-			// ticker.C receives a value every 30 seconds.
-			// time.Now() is passed as the cutoff — ExpireStale
-			// transitions all non-terminal sessions whose
-			// expires_at is before this moment to TIMEOUT.
 			case <-ticker.C:
-				m.storage.ExpireStale(context.Background(), time.Now())
+				ctx := context.Background()
+				m.runRecovery(ctx)
+				m.storage.ExpireStale(ctx, time.Now())
 
-			// m.stopCleanup is closed by Manager.Stop().
-			// Closing a channel unblocks all receivers simultaneously —
-			// this case fires immediately when Stop() is called,
-			// the goroutine returns, and ticker.Stop() runs via defer.
 			case <-m.stopCleanup:
 				return
 			}
 		}
 	}()
+}
+
+// runRecovery queries Daraja for all pending sessions older than QueryThreshold
+// and drives each one to its correct next state based on the query result.
+// Errors from individual sessions are logged and skipped — a single failed
+// query must not abort the entire recovery pass.
+func (m *Manager) runRecovery(ctx context.Context) {
+	threshold := time.Now().Add(-m.cfg.QueryThreshold)
+
+	sessions, err := m.storage.ListPending(ctx, threshold)
+	if err != nil {
+		log.Printf("session: recovery: list pending failed: %v", err)
+		return
+	}
+
+	for _, s := range sessions {
+		if s.CheckoutRequestID == "" {
+			// Session is in STK_PUSHED but Daraja never returned a
+			// CheckoutRequestID — STK Push was accepted but correlation
+			// ID was lost. Cannot query without it. Leave for ExpireStale.
+			continue
+		}
+
+		resultCode, _, err := m.auth.QuerySTKStatus(
+			ctx,
+			m.cfg.Shortcode,
+			m.cfg.Passkey,
+			s.CheckoutRequestID,
+		)
+		if err != nil {
+			log.Printf("session: recovery: query failed for %s: %v", s.CheckoutRequestID, err)
+			continue
+		}
+
+		event := queryResultCodeToEvent(resultCode)
+
+		if err := m.transition(ctx, s.ID, s.State, event, nil); err != nil {
+			// ErrInvalidTransition here means the session was already
+			// resolved by a late-arriving callback between ListPending
+			// and this transition — expected, not an error worth logging.
+			if err != store.ErrInvalidTransition {
+				log.Printf("session: recovery: transition failed for %s: %v", s.ID, err)
+			}
+		}
+	}
 }

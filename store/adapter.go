@@ -13,4 +13,5 @@ type StorageAdapter interface {
 	Transition(ctx context.Context, id string, from, to State, u *Update) error
 	ConsumeIfConfirmed(ctx context.Context, id string) (*Session, error)
 	ExpireStale(ctx context.Context, before time.Time) (int64, error)
+	ListPending(ctx context.Context, before time.Time) ([]*Session, error)
 }

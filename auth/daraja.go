@@ -47,6 +47,22 @@ type stkPushResponse struct {
 	ResponseDescription string `json:"ResponseDescription"`
 }
 
+// stkQueryBody mirrors the JSON body Daraja expects for an STK Push Query request.
+type stkQueryBody struct {
+	BusinessShortCode string `json:"BusinessShortCode"`
+	Password          string `json:"Password"`
+	Timestamp         string `json:"Timestamp"`
+	CheckoutRequestID string `json:"CheckoutRequestID"`
+}
+
+// stkQueryResponse mirrors the JSON body Daraja returns for an STK Push Query.
+// ResultCode is a string in the query response — unlike the callback where it
+// is an integer. "0" is success, "500.001.1001" means still processing.
+type stkQueryResponse struct {
+	ResultCode string `json:"ResultCode"`
+	ResultDesc string `json:"ResultDesc"`
+}
+
 // fetchToken makes a GET request to the Daraja OAuth endpoint and returns
 // a raw Bearer token and its expiry duration as strings.
 //
@@ -153,4 +169,65 @@ func (m *Manager) SendSTKPush(ctx context.Context, req store.STKPushRequest) (ch
 	}
 
 	return result.CheckoutRequestID, result.MerchantRequestID, nil
+}
+
+// QuerySTKStatus queries the Daraja STK Push Query endpoint for the current
+// status of a previously initiated STK Push request.
+//
+// Returns the raw ResultCode string and ResultDesc string from Daraja.
+// The caller is responsible for interpreting the result codes:
+//   - "0"           — payment confirmed
+//   - "500.001.1001" — still processing, prompt delivered awaiting PIN
+//   - anything else  — terminal failure
+//
+// Used by the session manager's recovery loop to resolve sessions whose
+// callbacks were never received.
+func (m *Manager) QuerySTKStatus(ctx context.Context, shortcode, passkey, checkoutRequestID string) (resultCode, resultDesc string, err error) {
+	token, err := m.GetAccessToken(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("querySTKStatus: failed to get token: %w", err)
+	}
+
+	password, timestamp := m.GeneratePassword(shortcode, passkey)
+	if password == "" {
+		return "", "", fmt.Errorf("querySTKStatus: failed to generate password")
+	}
+
+	body := stkQueryBody{
+		BusinessShortCode: shortcode,
+		Password:          password,
+		Timestamp:         timestamp,
+		CheckoutRequestID: checkoutRequestID,
+	}
+
+	buf := new(bytes.Buffer)
+	if err := json.NewEncoder(buf).Encode(body); err != nil {
+		return "", "", fmt.Errorf("querySTKStatus: encode failed: %w", err)
+	}
+
+	url := m.cfg.Environment.baseURL() + "/mpesa/stkpushquery/v1/query"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, buf)
+	if err != nil {
+		return "", "", fmt.Errorf("querySTKStatus: request build failed: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("querySTKStatus: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("querySTKStatus: unexpected status %d", resp.StatusCode)
+	}
+
+	var result stkQueryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", "", fmt.Errorf("querySTKStatus: decode failed: %w", err)
+	}
+
+	return result.ResultCode, result.ResultDesc, nil
 }
