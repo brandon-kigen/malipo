@@ -39,6 +39,10 @@ func (m *mockAuth) SendSTKPush(_ context.Context, _ store.STKPushRequest) (strin
 	return m.checkoutID, m.merchantID, nil
 }
 
+func (m *mockAuth) QuerySTKStatus(_ context.Context, _, _, _ string) (string, string, error) {
+	return "0", "Success", nil
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // newTestManager builds a Manager with a mock auth and fresh memory adapter.

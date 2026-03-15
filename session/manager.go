@@ -28,6 +28,7 @@ type Config struct {
 	Passkey          string
 	CallbackURL      string
 	TTL              time.Duration // defaults to 90s if zero
+	QueryThreshold   time.Duration // how long to wait before querying — defaults to 60s if zero
 	AccountReference string        // default reference shown on M-Pesa prompt
 	TransactionDesc  string        // default description shown on M-Pesa prompt
 }
@@ -39,7 +40,7 @@ type Manager struct {
 	storage     store.StorageAdapter
 	auth        TokenProvider
 	cfg         Config
-	entropy     io.Reader    // cryptographically secure monotonic ULID entropy
+	entropy     io.Reader     // cryptographically secure monotonic ULID entropy
 	stopCleanup chan struct{} // closed when Manager shuts down via Stop()
 }
 
@@ -50,6 +51,9 @@ func NewManager(auth TokenProvider, storage store.StorageAdapter, cfg Config) *M
 	if cfg.TTL == 0 {
 		cfg.TTL = 90 * time.Second
 	}
+	if cfg.QueryThreshold == 0 {
+    cfg.QueryThreshold = 60 * time.Second
+}
 
 	m := &Manager{
 		auth:        auth,
@@ -164,16 +168,16 @@ func (m *Manager) InitiatePayment(ctx context.Context, req PaymentRequest) (stri
 	// Step 6 — send STK Push to Daraja
 	// sendSTKPush is a stub — implemented when auth package is complete
 	checkoutID, merchantID, err := m.sendSTKPush(ctx, store.STKPushRequest{
-    Token:       token,
-    Password:    password,
-    Timestamp:   timestamp,
-    Phone:       phone,
-    Amount:      req.Amount,
-    Shortcode:   m.cfg.Shortcode,
-    CallbackURL: m.cfg.CallbackURL,
-    Reference:   ref,
-    Desc:        desc,
-})
+		Token:       token,
+		Password:    password,
+		Timestamp:   timestamp,
+		Phone:       phone,
+		Amount:      req.Amount,
+		Shortcode:   m.cfg.Shortcode,
+		CallbackURL: m.cfg.CallbackURL,
+		Reference:   ref,
+		Desc:        desc,
+	})
 	if err != nil {
 		// transition to FAILED — session exists in storage, must not be left in CREATED
 		_ = m.transition(ctx, id, store.StateCreated, EventSTKRejected, nil)
@@ -195,9 +199,29 @@ func (m *Manager) InitiatePayment(ctx context.Context, req PaymentRequest) (stri
 	return id, nil
 }
 
+// HandleCallback processes the result of a Safaricom STK Push callback.
+// It maps the raw ResultCode to a session event and fires the appropriate
+// state transition. u carries the confirmed payment details and must be
+// non-nil when resultCode is 0 — it is ignored for non-zero codes.
+//
+// Returns store.ErrNotFound if no session is indexed under checkoutRequestID.
+// Returns store.ErrInvalidTransition if the session is already terminal —
+// this is expected when the STK Push Query recovery loop resolved the session
+// before the callback arrived. The caller should log and ignore this error.
+func (m *Manager) HandleCallback(ctx context.Context, checkoutRequestID string, resultCode int, u *store.Update) error {
+	session, err := m.storage.GetByCheckoutID(ctx, checkoutRequestID)
+	if err != nil {
+		return err
+	}
+
+	event := resultCodeToEvent(resultCode)
+
+	return m.transition(ctx, session.ID, session.State, event, u)
+}
+
 // sendSTKPush makes the outbound HTTP call to the Daraja STK Push endpoint.
 func (m *Manager) sendSTKPush(ctx context.Context, req store.STKPushRequest) (checkoutID, merchantID string, err error) {
-    return m.auth.SendSTKPush(ctx, req)
+	return m.auth.SendSTKPush(ctx, req)
 }
 
 func (m *Manager) ConsumeIfConfirmed(ctx context.Context, sessionID string) error {
@@ -205,6 +229,5 @@ func (m *Manager) ConsumeIfConfirmed(ctx context.Context, sessionID string) erro
 	if err != nil {
 		return err
 	}
-  return nil
+	return nil
 }
-
