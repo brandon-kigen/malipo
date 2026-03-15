@@ -196,7 +196,15 @@ func (m *Manager) InitiatePayment(ctx context.Context, req PaymentRequest) (stri
 }
 
 // sendSTKPush makes the outbound HTTP call to the Daraja STK Push endpoint.
-// TODO: Stub — implemented in Phase 2 when auth package HTTP client is complete.
 func (m *Manager) sendSTKPush(ctx context.Context, req store.STKPushRequest) (checkoutID, merchantID string, err error) {
     return m.auth.SendSTKPush(ctx, req)
 }
+
+func (m *Manager) ConsumeIfConfirmed(ctx context.Context, sessionID string) error {
+	_, err := m.storage.ConsumeIfConfirmed(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+  return nil
+}
+

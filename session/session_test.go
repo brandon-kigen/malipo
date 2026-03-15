@@ -348,6 +348,108 @@ func TestTTLExpiry(t *testing.T) {
 	})
 }
 
+// ── ConsumeIfConfirmed ────────────────────────────────────────────────────────
+
+func TestConsumeIfConfirmed(t *testing.T) {
+	ctx := context.Background()
+
+	// createConfirmed builds a manager with direct storage access,
+	// initiates a payment, and drives the session to CONFIRMED via storage —
+	// mimicking what the Phase 5 callback handler will do in production.
+	createConfirmed := func(t *testing.T, checkoutID, merchantID string) (*session.Manager, *memory.MemoryAdapter, string) {
+		t.Helper()
+		storage := memory.NewMemoryAdapter()
+		auth := &mockAuth{
+			token:      "test-token",
+			checkoutID: checkoutID,
+			merchantID: merchantID,
+		}
+		m := session.NewManager(auth, storage, session.Config{
+			Shortcode:   "174379",
+			Passkey:     "testpasskey",
+			CallbackURL: "https://example.com/callback",
+			TTL:         90 * time.Second,
+		})
+		t.Cleanup(func() { m.Stop() })
+
+		id, err := m.InitiatePayment(ctx, validRequest())
+		if err != nil {
+			t.Fatalf("InitiatePayment failed: %v", err)
+		}
+
+		if err := storage.Transition(ctx, id, store.StateSTKPushed, store.StateConfirmed, &store.Update{
+			MpesaReceiptNumber: strPtr("RCP_CONF"),
+			ConfirmedAmount:    int64Ptr(100),
+			ConfirmedPhone:     strPtr("+254712345678"),
+		}); err != nil {
+			t.Fatalf("Transition to CONFIRMED failed: %v", err)
+		}
+
+		return m, storage, id
+	}
+
+	t.Run("returns nil and transitions session to CONSUMED", func(t *testing.T) {
+		m, _, id := createConfirmed(t, "ws_CO_CIF1", "MR_CIF1")
+
+		if err := m.ConsumeIfConfirmed(ctx, id); err != nil {
+			t.Fatalf("ConsumeIfConfirmed failed: %v", err)
+		}
+
+		state, _, err := m.GetStatus(ctx, id)
+		if err != nil {
+			t.Fatalf("GetStatus after consume failed: %v", err)
+		}
+		if state != string(store.StateConsumed) {
+			t.Errorf("got state %q want CONSUMED", state)
+		}
+	})
+
+	t.Run("returns ErrNotFound for unknown session", func(t *testing.T) {
+		m, _, _ := createConfirmed(t, "ws_CO_CIF2", "MR_CIF2")
+
+		err := m.ConsumeIfConfirmed(ctx, "nonexistent-session-id")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("got error %v want ErrNotFound", err)
+		}
+	})
+
+	t.Run("returns ErrAlreadyConsumed on second call", func(t *testing.T) {
+		m, _, id := createConfirmed(t, "ws_CO_CIF3", "MR_CIF3")
+
+		if err := m.ConsumeIfConfirmed(ctx, id); err != nil {
+			t.Fatalf("first ConsumeIfConfirmed failed: %v", err)
+		}
+
+		err := m.ConsumeIfConfirmed(ctx, id)
+		if !errors.Is(err, store.ErrAlreadyConsumed) {
+			t.Errorf("got error %v want ErrAlreadyConsumed", err)
+		}
+	})
+
+	t.Run("returns ErrInvalidTransition when session is STK_PUSHED not CONFIRMED", func(t *testing.T) {
+		storage := memory.NewMemoryAdapter()
+		auth := &mockAuth{token: "test-token", checkoutID: "ws_CO_CIF4", merchantID: "MR_CIF4"}
+		m := session.NewManager(auth, storage, session.Config{
+			Shortcode:   "174379",
+			Passkey:     "testpasskey",
+			CallbackURL: "https://example.com/callback",
+			TTL:         90 * time.Second,
+		})
+		t.Cleanup(func() { m.Stop() })
+
+		// InitiatePayment leaves session in STK_PUSHED — not CONFIRMED
+		id, err := m.InitiatePayment(ctx, validRequest())
+		if err != nil {
+			t.Fatalf("InitiatePayment failed: %v", err)
+		}
+
+		err = m.ConsumeIfConfirmed(ctx, id)
+		if !errors.Is(err, store.ErrInvalidTransition) {
+			t.Errorf("got error %v want ErrInvalidTransition", err)
+		}
+	})
+}
+
 // ── Stop ──────────────────────────────────────────────────────────────────────
 
 func TestStop(t *testing.T) {
