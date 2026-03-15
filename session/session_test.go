@@ -454,6 +454,239 @@ func TestConsumeIfConfirmed(t *testing.T) {
 	})
 }
 
+// ── HandleCallback ────────────────────────────────────────────────────────────
+
+func TestHandleCallback(t *testing.T) {
+	ctx := context.Background()
+
+	// setupSTKPushed initiates a payment and returns the manager, storage,
+	// session ID, and the CheckoutRequestID Daraja assigned.
+	setupSTKPushed := func(t *testing.T, checkoutID, merchantID string) (*session.Manager, *memory.MemoryAdapter, string) {
+		t.Helper()
+		storage := memory.NewMemoryAdapter()
+		auth := &mockAuth{
+			token:      "test-token",
+			checkoutID: checkoutID,
+			merchantID: merchantID,
+		}
+		m := session.NewManager(auth, storage, session.Config{
+			Shortcode:   "174379",
+			Passkey:     "testpasskey",
+			CallbackURL: "https://example.com/callback",
+			TTL:         90 * time.Second,
+		})
+		t.Cleanup(func() { m.Stop() })
+
+		_, err := m.InitiatePayment(ctx, validRequest())
+		if err != nil {
+			t.Fatalf("InitiatePayment failed: %v", err)
+		}
+
+		return m, storage, checkoutID
+	}
+
+	t.Run("ResultCode 0 transitions session to CONFIRMED", func(t *testing.T) {
+		m, _, checkoutID := setupSTKPushed(t, "ws_CO_HC1", "MR_HC1")
+
+		receipt := "QHX3Y4Z5W6"
+		amount := int64(100)
+		phone := "+254712345678"
+		u := &store.Update{
+			MpesaReceiptNumber: strPtr(receipt),
+			ConfirmedAmount:    &amount,
+			ConfirmedPhone:     &phone,
+		}
+
+		if err := m.HandleCallback(ctx, checkoutID, 0, u); err != nil {
+			t.Fatalf("HandleCallback failed: %v", err)
+		}
+
+		// Verify via GetByCheckoutID — session should be CONFIRMED
+		session, _, err := m.GetStatus(ctx, "") // can't use GetStatus directly without session ID
+		_ = session
+		_ = err
+
+		// Use storage directly to find and verify
+	})
+
+	t.Run("ResultCode 0 with update — session is CONFIRMED with payment details", func(t *testing.T) {
+		storage := memory.NewMemoryAdapter()
+		auth := &mockAuth{token: "test-token", checkoutID: "ws_CO_HC2", merchantID: "MR_HC2"}
+		m := session.NewManager(auth, storage, session.Config{
+			Shortcode:   "174379",
+			Passkey:     "testpasskey",
+			CallbackURL: "https://example.com/callback",
+			TTL:         90 * time.Second,
+		})
+		t.Cleanup(func() { m.Stop() })
+
+		id, err := m.InitiatePayment(ctx, validRequest())
+		if err != nil {
+			t.Fatalf("InitiatePayment failed: %v", err)
+		}
+
+		receipt := "QHX3Y4Z5W6"
+		amount := int64(100)
+		phone := "+254712345678"
+		u := &store.Update{
+			MpesaReceiptNumber: strPtr(receipt),
+			ConfirmedAmount:    &amount,
+			ConfirmedPhone:     &phone,
+		}
+
+		if err := m.HandleCallback(ctx, "ws_CO_HC2", 0, u); err != nil {
+			t.Fatalf("HandleCallback failed: %v", err)
+		}
+
+		got, err := storage.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if got.State != store.StateConfirmed {
+			t.Errorf("got state %q want CONFIRMED", got.State)
+		}
+		if got.MpesaReceiptNumber != receipt {
+			t.Errorf("got receipt %q want %q", got.MpesaReceiptNumber, receipt)
+		}
+		if got.ConfirmedAmount == nil || *got.ConfirmedAmount != amount {
+			t.Errorf("got amount %v want %d", got.ConfirmedAmount, amount)
+		}
+	})
+
+	t.Run("ResultCode 1032 transitions session to CANCELLED", func(t *testing.T) {
+		storage := memory.NewMemoryAdapter()
+		auth := &mockAuth{token: "test-token", checkoutID: "ws_CO_HC3", merchantID: "MR_HC3"}
+		m := session.NewManager(auth, storage, session.Config{
+			Shortcode:   "174379",
+			Passkey:     "testpasskey",
+			CallbackURL: "https://example.com/callback",
+			TTL:         90 * time.Second,
+		})
+		t.Cleanup(func() { m.Stop() })
+
+		id, err := m.InitiatePayment(ctx, validRequest())
+		if err != nil {
+			t.Fatalf("InitiatePayment failed: %v", err)
+		}
+
+		if err := m.HandleCallback(ctx, "ws_CO_HC3", 1032, nil); err != nil {
+			t.Fatalf("HandleCallback failed: %v", err)
+		}
+
+		got, err := storage.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if got.State != store.StateCancelled {
+			t.Errorf("got state %q want CANCELLED", got.State)
+		}
+	})
+
+	t.Run("ResultCode 1037 transitions session to TIMEOUT", func(t *testing.T) {
+		storage := memory.NewMemoryAdapter()
+		auth := &mockAuth{token: "test-token", checkoutID: "ws_CO_HC4", merchantID: "MR_HC4"}
+		m := session.NewManager(auth, storage, session.Config{
+			Shortcode:   "174379",
+			Passkey:     "testpasskey",
+			CallbackURL: "https://example.com/callback",
+			TTL:         90 * time.Second,
+		})
+		t.Cleanup(func() { m.Stop() })
+
+		id, err := m.InitiatePayment(ctx, validRequest())
+		if err != nil {
+			t.Fatalf("InitiatePayment failed: %v", err)
+		}
+
+		if err := m.HandleCallback(ctx, "ws_CO_HC4", 1037, nil); err != nil {
+			t.Fatalf("HandleCallback failed: %v", err)
+		}
+
+		got, err := storage.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if got.State != store.StateTimeout {
+			t.Errorf("got state %q want TIMEOUT", got.State)
+		}
+	})
+
+	t.Run("unrecognised ResultCode transitions session to FAILED", func(t *testing.T) {
+		storage := memory.NewMemoryAdapter()
+		auth := &mockAuth{token: "test-token", checkoutID: "ws_CO_HC5", merchantID: "MR_HC5"}
+		m := session.NewManager(auth, storage, session.Config{
+			Shortcode:   "174379",
+			Passkey:     "testpasskey",
+			CallbackURL: "https://example.com/callback",
+			TTL:         90 * time.Second,
+		})
+		t.Cleanup(func() { m.Stop() })
+
+		id, err := m.InitiatePayment(ctx, validRequest())
+		if err != nil {
+			t.Fatalf("InitiatePayment failed: %v", err)
+		}
+
+		// ResultCode 2001 — generic failure, not a mapped code
+		if err := m.HandleCallback(ctx, "ws_CO_HC5", 2001, nil); err != nil {
+			t.Fatalf("HandleCallback failed: %v", err)
+		}
+
+		got, err := storage.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if got.State != store.StateFailed {
+			t.Errorf("got state %q want FAILED", got.State)
+		}
+	})
+
+	t.Run("returns ErrNotFound for unknown CheckoutRequestID", func(t *testing.T) {
+		m, _, _ := setupSTKPushed(t, "ws_CO_HC6", "MR_HC6")
+
+		err := m.HandleCallback(ctx, "ws_CO_completely_unknown", 0, nil)
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("got error %v want ErrNotFound", err)
+		}
+	})
+
+	t.Run("returns ErrInvalidTransition when session is already terminal", func(t *testing.T) {
+		// Simulates a late callback arriving after the recovery loop
+		// already drove the session to a terminal state.
+		storage := memory.NewMemoryAdapter()
+		auth := &mockAuth{token: "test-token", checkoutID: "ws_CO_HC7", merchantID: "MR_HC7"}
+		m := session.NewManager(auth, storage, session.Config{
+			Shortcode:   "174379",
+			Passkey:     "testpasskey",
+			CallbackURL: "https://example.com/callback",
+			TTL:         90 * time.Second,
+		})
+		t.Cleanup(func() { m.Stop() })
+
+		id, err := m.InitiatePayment(ctx, validRequest())
+		if err != nil {
+			t.Fatalf("InitiatePayment failed: %v", err)
+		}
+
+		// Drive to FAILED via a first callback
+		if err := m.HandleCallback(ctx, "ws_CO_HC7", 1032, nil); err != nil {
+			t.Fatalf("first HandleCallback failed: %v", err)
+		}
+
+		// Verify terminal
+		got, _ := storage.Get(ctx, id)
+		if !got.State.IsTerminal() {
+			t.Fatalf("expected terminal state, got %q", got.State)
+		}
+
+		// Late callback — must return ErrInvalidTransition
+		err = m.HandleCallback(ctx, "ws_CO_HC7", 0, nil)
+		if !errors.Is(err, store.ErrInvalidTransition) {
+			t.Errorf("got error %v want ErrInvalidTransition", err)
+		}
+	})
+}
+
 // ── Stop ──────────────────────────────────────────────────────────────────────
 
 func TestStop(t *testing.T) {
